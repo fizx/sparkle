@@ -1,7 +1,14 @@
-export type Initializer<T> = T | (() => T | Promise<T>);
+type IsFunction<T> = T extends (...args: any[]) => any ? true : false;
+type Initializer<T> = IsFunction<T> extends true
+  ? never
+  : T | (() => T | Promise<T>);
 
 export default function $<T>(initializer: Initializer<T>) {
-  return new Sparkle<T>(initializer);
+  const key = [...scope, nextId++].join(".");
+  const sparkle =
+    key in lastSparkles ? lastSparkles[key] : new Sparkle<T>(initializer);
+  sparkles[key] = sparkle!;
+  return sparkle;
 }
 
 export enum SparkleState {
@@ -12,44 +19,106 @@ export enum SparkleState {
   Stale,
 }
 
+function changed() {}
+
+export let scope: string[] = [];
+export let sparkles: { [key: string]: Sparkle<any> } = {};
+export let lastSparkles: { [key: string]: Sparkle<any> } = {};
+let nextId = 0;
+
+export function sparkleRoot<T>(f: () => T) {
+  scope = [];
+  nextId = 0;
+  lastSparkles = { ...sparkles };
+  sparkles = {};
+  try {
+    return f();
+  } finally {
+    scope = [];
+    for (const key in lastSparkles) {
+      if (!(key in sparkles)) {
+        delete lastSparkles[key];
+      }
+    }
+  }
+}
+
+export function sparkleScope<T>(name: string, f: () => T) {
+  scope.push(name);
+  const origNextId = nextId;
+  try {
+    return f();
+  } finally {
+    scope.pop();
+    nextId = origNextId;
+  }
+}
+
 export class Sparkle<T> {
-  #initializer: Initializer<T>;
-  #state: SparkleState;
-  #value: T | undefined;
-  #error: any;
+  _initializer: Initializer<T>;
+  _promise: Promise<T> | undefined;
+  _state: SparkleState;
+  _value: T | undefined;
+  _error: any;
   constructor(initializer: Initializer<T>) {
-    this.#initializer = initializer;
-    this.#state = SparkleState.Uninitialized;
+    this._initializer = initializer;
+    this._state = SparkleState.Uninitialized;
   }
 
   get state() {
-    return this.#state;
+    return this._state;
   }
 
   update(t: T) {
-    this.#state = SparkleState.Fulfilled;
-    this.#value = t;
+    this._state = SparkleState.Fulfilled;
+    this._value = t;
   }
 
   then(onFulfilled: (value: T) => any, onRejected?: (error: any) => any) {
-    if (this.#state === SparkleState.Fulfilled) {
-      if (this.#value !== undefined) {
-        onFulfilled(this.#value);
+    if (this._state === SparkleState.Fulfilled) {
+      if (this._value !== undefined) {
+        onFulfilled(this._value);
       } else {
         throw new Error("Value is undefined");
       }
-    } else if (this.#state === SparkleState.Rejected) {
-      onRejected?.(this.#error);
+    } else if (this._state === SparkleState.Rejected) {
+      onRejected?.(this._error);
     }
   }
 
   get value() {
-    if (this.#error) {
-      throw this.#error;
+    if (this._state === SparkleState.Uninitialized) {
+      this._state = SparkleState.Pending;
+      const result =
+        typeof this._initializer === "function"
+          ? this._initializer()
+          : this._initializer;
+      if (result instanceof Promise) {
+        this._promise = result;
+        result.then(
+          (value) => {
+            this._state = SparkleState.Fulfilled;
+            this._value = value;
+            changed();
+          },
+          (error) => {
+            this._state = SparkleState.Rejected;
+            this._error = error;
+            changed();
+          }
+        );
+      } else {
+        this._state = SparkleState.Fulfilled;
+        this._value = result;
+        changed();
+      }
     }
-    if (this.#state === SparkleState.Fulfilled) {
-      return this.#value;
+    if (this._error) {
+      throw this._error;
     }
-    throw this.#state;
+    if (this._state === SparkleState.Fulfilled && this._value !== undefined) {
+      return this._value;
+    }
+    throw this._state;
   }
 }

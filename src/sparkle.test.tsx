@@ -1,4 +1,4 @@
-import { vi, describe, test, expect } from "vitest";
+import { vi, describe, test, expect, beforeEach } from "vitest";
 import $, {
   clearSubscriptions,
   sparkleRoot,
@@ -6,6 +6,7 @@ import $, {
   sparkleScope,
   subscribe,
 } from "./index";
+import exp from "constants";
 
 export interface JSXElement {
   type: string | ((props: { [key: string]: any }) => JSXElement);
@@ -50,10 +51,6 @@ export function renderElement(element: JSXElement): string {
         )
         .join("");
 
-      if (element.type === undefined) {
-        console.log("hi");
-      }
-
       return `<${element.type}${formatProps(element.props)}>${children}</${
         element.type
       }>`;
@@ -91,9 +88,41 @@ function App() {
   );
 }
 
+function ChainedPromisesApp({
+  a,
+  b,
+}: {
+  a: Promise<string>;
+  b: Promise<string>;
+}) {
+  const first = $(() => {
+    return a;
+  });
+  const second = $(async () => {
+    calls++;
+    if (calls > 100) {
+      throw new Error("too many calls");
+    }
+    return first.value + " " + (await b);
+  });
+  return (
+    <div>
+      <div>{second.loading ? "loading" : second.value}</div>
+    </div>
+  );
+}
+
 function Child(props: { text: string }) {
   return <div>{props.text}</div>;
 }
+
+beforeEach(() => {
+  calls = 0;
+  clearSubscriptions();
+  for (const key in sparkles) {
+    delete sparkles[key];
+  }
+});
 
 describe("sparkle", () => {
   describe("render", () => {
@@ -109,19 +138,86 @@ describe("sparkle", () => {
       );
     });
   });
+
+  describe("promises chaining", () => {
+    test("should be initially loading", async () => {
+      const a = new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve("Hello");
+        }, 10);
+      });
+      const b = new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve("World");
+        }, 10);
+      });
+      expect(render(<ChainedPromisesApp a={a} b={b} />)).toMatchInlineSnapshot(
+        `"<div><div>loading</div></div>"`
+      );
+      expect(sparkles).toMatchInlineSnapshot(`
+        {
+          "ChainedPromisesApp.0": Sparkle {
+            "_state": "pending",
+          },
+          "ChainedPromisesApp.1": Sparkle {
+            "_state": "pending",
+          },
+        }
+      `);
+    });
+
+    test("should be loading if a is loading even if b would be resolved", async () => {
+      const states: Array<any> = [];
+      subscribe(() => {
+        states.push({ ...sparkles });
+      });
+      const a = new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve("Hello");
+        }, 5);
+      });
+      const b = new Promise<string>((resolve) => {
+        resolve("World");
+      });
+      expect(render(<ChainedPromisesApp a={a} b={b} />)).toMatchInlineSnapshot(
+        `"<div><div>loading</div></div>"`
+      );
+      expect(sparkles).toMatchInlineSnapshot(`
+        {
+          "ChainedPromisesApp.0": Sparkle {
+            "_state": "pending",
+          },
+          "ChainedPromisesApp.1": Sparkle {
+            "_state": "pending",
+          },
+        }
+      `);
+      // wait for all promises to resolve
+      function anyPending() {
+        return Object.values(sparkles).some((s) => s.state === "pending");
+      }
+      let i = 0;
+      while (anyPending() && i++ < 10) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(!anyPending()).toBe(true);
+      expect(render(<ChainedPromisesApp a={a} b={b} />)).toMatchInlineSnapshot(
+        `"<div><div>Hello World</div></div>"`
+      );
+    });
+  });
+
   describe("state", () => {
     test("should update state", () => {
       render(<App />);
       expect(sparkles).toMatchInlineSnapshot(`
         {
           "App.0": Sparkle {
-            "_initializer": "Hello",
-            "_state": 2,
+            "_state": "fulfilled",
             "_value": "Hello",
           },
           "App.1": Sparkle {
-            "_initializer": [Function],
-            "_state": 2,
+            "_state": "fulfilled",
             "_value": 5,
           },
         }
@@ -144,7 +240,9 @@ describe("sparkle", () => {
       });
       sparkles["App.0"].update("Hello World");
       expect(notis).toBe(1);
-      expect(render(<App />)).toMatchInlineSnapshot(`"<div><div>Hello World</div><div>5</div></div>"`);
+      expect(render(<App />)).toMatchInlineSnapshot(
+        `"<div><div>Hello World</div><div>5</div></div>"`
+      );
     });
   });
 });

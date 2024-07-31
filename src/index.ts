@@ -8,17 +8,20 @@ export default function $<T>(
   key: string = [...scope, nextId++].join(".")
 ) {
   const sparkle =
-    key in lastSparkles ? lastSparkles[key] : new Sparkle<T>(initializer);
+    key in lastSparkles
+      ? lastSparkles[key]
+      : new Sparkle<T>(initializer, { key });
   sparkles[key] = sparkle!;
   return sparkle;
 }
 
 export enum SparkleState {
-  Uninitialized,
-  Pending,
-  Fulfilled,
-  Rejected,
-  Stale,
+  Uninitialized = "uninitialized",
+  Pending = "pending",
+  Blocked = "blocked",
+  Fulfilled = "fulfilled",
+  Rejected = "rejected",
+  Stale = "stale",
 }
 
 function changed() {
@@ -75,15 +78,21 @@ export function sparkleScope<T>(name: string, f: () => T) {
   }
 }
 
+type Options = {
+  key?: string;
+};
+
 export class Sparkle<T> {
-  _initializer: Initializer<T>;
-  _promise: Promise<T> | undefined;
+  #initializer: Initializer<T>;
+  #promise: Promise<T> | undefined;
   _state: SparkleState;
   _value: T | undefined;
   _error: any;
-  constructor(initializer: Initializer<T>) {
-    this._initializer = initializer;
+  #options: Options;
+  constructor(initializer: Initializer<T>, options: Options = {}) {
+    this.#initializer = initializer;
     this._state = SparkleState.Uninitialized;
+    this.#options = options;
   }
 
   get state() {
@@ -105,18 +114,54 @@ export class Sparkle<T> {
       }
     } else if (this._state === SparkleState.Rejected) {
       onRejected?.(this._error);
+    } else {
+      const unsub = subscribe(() => {
+        unsub();
+        this.then(onFulfilled, onRejected);
+      });
     }
   }
 
-  get value() {
-    if (this._state === SparkleState.Uninitialized) {
-      this._state = SparkleState.Pending;
-      const result =
-        typeof this._initializer === "function"
-          ? this._initializer()
-          : this._initializer;
+  get loading() {
+    this.#maybeLoad();
+    return this._state === SparkleState.Pending;
+  }
+
+  #handleError(error: any) {
+    if (error === SparkleState.Pending || error === SparkleState.Blocked) {
+      const unsub = subscribe(() => {
+        unsub();
+        this.#maybeLoad();
+      });
+      const was = this._state;
+      this._state = SparkleState.Blocked;
+      if (was !== SparkleState.Blocked) {
+        changed();
+      }
+    } else {
+      this._state = SparkleState.Rejected;
+      this._error = error;
+      changed();
+    }
+  }
+
+  #maybeLoad() {
+    if (
+      this._state === SparkleState.Uninitialized ||
+      this._state === SparkleState.Blocked
+    ) {
+      let result;
+      try {
+        result =
+          typeof this.#initializer === "function"
+            ? this.#initializer()
+            : this.#initializer;
+      } catch (error) {
+        this.#handleError(error);
+        return;
+      }
       if (result instanceof Promise) {
-        this._promise = result;
+        this.#promise = result;
         result.then(
           (value) => {
             this._state = SparkleState.Fulfilled;
@@ -124,18 +169,24 @@ export class Sparkle<T> {
             changed();
           },
           (error) => {
-            this._state = SparkleState.Rejected;
-            this._error = error;
-            changed();
+            this.#handleError(error);
           }
         );
+        if (this._state === SparkleState.Uninitialized) {
+          this._state = SparkleState.Pending;
+          changed();
+        }
       } else {
         this._state = SparkleState.Fulfilled;
         this._value = result;
         changed();
       }
     }
-    if (this._error) {
+  }
+
+  get value() {
+    this.#maybeLoad();
+    if (this._state === SparkleState.Rejected) {
       throw this._error;
     }
     if (this._state === SparkleState.Fulfilled && this._value !== undefined) {

@@ -3,8 +3,10 @@ type Initializer<T> = IsFunction<T> extends true
   ? never
   : T | (() => T | Promise<T>);
 
-export default function $<T>(initializer: Initializer<T>) {
-  const key = [...scope, nextId++].join(".");
+export default function $<T>(
+  initializer: Initializer<T>,
+  key: string = [...scope, nextId++].join(".")
+) {
   const sparkle =
     key in lastSparkles ? lastSparkles[key] : new Sparkle<T>(initializer);
   sparkles[key] = sparkle!;
@@ -19,7 +21,26 @@ export enum SparkleState {
   Stale,
 }
 
-function changed() {}
+function changed() {
+  for (const key in callbacks) {
+    callbacks[key]();
+  }
+}
+
+let nextCallbackId = 0;
+let callbacks: { [key: number]: () => void } = {};
+
+export function subscribe(callback: () => void): () => void {
+  const id = nextCallbackId++;
+  callbacks[id] = callback;
+  return () => {
+    delete callbacks[id];
+  };
+}
+
+export function clearSubscriptions() {
+  callbacks = {};
+}
 
 export let scope: string[] = [];
 export let sparkles: { [key: string]: Sparkle<any> } = {};
@@ -72,6 +93,7 @@ export class Sparkle<T> {
   update(t: T) {
     this._state = SparkleState.Fulfilled;
     this._value = t;
+    changed();
   }
 
   then(onFulfilled: (value: T) => any, onRejected?: (error: any) => any) {

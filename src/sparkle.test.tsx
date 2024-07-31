@@ -1,5 +1,11 @@
 import { vi, describe, test, expect } from "vitest";
-import $, { sparkleRoot, sparkles, sparkleScope } from "./index";
+import $, {
+  clearSubscriptions,
+  sparkleRoot,
+  sparkles,
+  sparkleScope,
+  subscribe,
+} from "./index";
 
 export interface JSXElement {
   type: string | ((props: { [key: string]: any }) => JSXElement);
@@ -121,11 +127,24 @@ describe("sparkle", () => {
         }
       `);
     });
+
     test("should reuse sparkles", () => {
       render(<App />);
       expect(calls).toBe(1);
       render(<App />);
       expect(calls).toBe(1);
+    });
+
+    test("changes should be detected", () => {
+      clearSubscriptions();
+      let notis = 0;
+      render(<App />);
+      subscribe(() => {
+        notis++;
+      });
+      sparkles["App.0"].update("Hello World");
+      expect(notis).toBe(1);
+      expect(render(<App />)).toMatchInlineSnapshot(`"<div><div>Hello World</div><div>5</div></div>"`);
     });
   });
 });

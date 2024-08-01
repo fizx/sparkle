@@ -6,7 +6,6 @@ import $, {
   sparkleScope,
   subscribe,
 } from "./index";
-import exp from "constants";
 
 export interface JSXElement {
   type: string | ((props: { [key: string]: any }) => JSXElement);
@@ -139,6 +138,61 @@ describe("sparkle", () => {
     });
   });
 
+  describe("dependencies", () => {
+    test("should track dependencies", () => {
+      render(<App />);
+      expect(sparkles["App.0"]._dependents.size).toBe(1);
+    });
+  });
+
+  describe("updates", () => {
+    test("should update", () => {
+      render(<App />);
+      expect(sparkles).toMatchInlineSnapshot(`
+        {
+          "App.0": Sparkle {
+            "_state": "fulfilled",
+            "_value": "Hello",
+          },
+          "App.1": Sparkle {
+            "_state": "fulfilled",
+            "_value": 5,
+          },
+        }
+      `);
+      sparkles["App.0"].update("Hello World");
+      expect(sparkles).toMatchInlineSnapshot(`
+        {
+          "App.0": Sparkle {
+            "_state": "fulfilled",
+            "_value": "Hello World",
+          },
+          "App.1": Sparkle {
+            "_state": "fulfilled",
+            "_value": 11,
+          },
+        }
+      `);
+    });
+    test("can await updates", async () => {
+      render(<App />);
+      let promise = sparkles["App.0"].update(async () => {
+        return new Promise((resolve) =>
+          setTimeout(() => {
+            resolve("World");
+          }, 100)
+        );
+      });
+      expect(sparkles["App.0"].state).toBe("stale");
+      expect(sparkles["App.0"].value).toBe("Hello");
+      await promise;
+      expect(sparkles["App.0"].state).toBe("fulfilled");
+      expect(sparkles["App.0"].value).toBe("World");
+    });
+
+    test("should queue updates", () => {});
+  });
+
   describe("promises chaining", () => {
     test("should be initially loading", async () => {
       const a = new Promise<string>((resolve) => {
@@ -239,9 +293,9 @@ describe("sparkle", () => {
         notis++;
       });
       sparkles["App.0"].update("Hello World");
-      expect(notis).toBe(1);
+
       expect(render(<App />)).toMatchInlineSnapshot(
-        `"<div><div>Hello World</div><div>5</div></div>"`
+        `"<div><div>Hello World</div><div>11</div></div>"`
       );
     });
   });

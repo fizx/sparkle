@@ -3,6 +3,10 @@ type Initializer<T> = IsFunction<T> extends true
   ? never
   : T | (() => T | Promise<T>);
 
+type Updater<T> = IsFunction<T> extends true
+  ? never
+  : T | ((t: T) => T | Promise<T>);
+
 export default function $<T>(
   initializer: Initializer<T>,
   key: string = [...scope, nextId++].join(".")
@@ -82,27 +86,64 @@ type Options = {
   key?: string;
 };
 
+type Item<T> = {
+  updater: Updater<T>;
+  resolve?: (value: T) => void;
+  reject?: (error: any) => void;
+};
+
 export class Sparkle<T> {
-  #initializer: Initializer<T>;
+  #queue: Item<T>[];
   #promise: Promise<T> | undefined;
   _state: SparkleState;
   _value: T | undefined;
   _error: any;
+  #dependents: Set<Sparkle<any>> = new Set();
   #options: Options;
   constructor(initializer: Initializer<T>, options: Options = {}) {
-    this.#initializer = initializer;
+    this.#queue = [{ updater: initializer }];
     this._state = SparkleState.Uninitialized;
     this.#options = options;
+  }
+
+  get _dependents() {
+    return this.#dependents;
   }
 
   get state() {
     return this._state;
   }
 
-  update(t: T) {
-    this._state = SparkleState.Fulfilled;
-    this._value = t;
-    changed();
+  update(t: Updater<T>) {
+    if (
+      this._state === SparkleState.Fulfilled ||
+      this._state === SparkleState.Rejected
+    ) {
+      this.#queue.shift();
+    }
+    this._state = SparkleState.Stale;
+
+    return new Promise<T>((resolve, reject) => {
+      this.#queue.push({ updater: t, resolve, reject });
+      const unsub = subscribe(() => {
+        unsub();
+        this.#maybeLoad();
+      });
+      changed();
+    });
+  }
+
+  #next() {
+    if (this.#queue.length > 1) {
+      this.#queue.shift();
+      this._state === SparkleState.Stale;
+      this.#maybeLoad();
+    }
+  }
+
+  refresh() {
+    this._state = SparkleState.Uninitialized;
+    this.#maybeLoad();
   }
 
   then(onFulfilled: (value: T) => any, onRejected?: (error: any) => any) {
@@ -139,8 +180,11 @@ export class Sparkle<T> {
         changed();
       }
     } else {
+      this.#queue[0]?.reject?.(error);
       this._state = SparkleState.Rejected;
       this._error = error;
+      this.#refreshDependents();
+      this.#next();
       changed();
     }
   }
@@ -148,24 +192,30 @@ export class Sparkle<T> {
   #maybeLoad() {
     if (
       this._state === SparkleState.Uninitialized ||
+      this._state === SparkleState.Stale ||
       this._state === SparkleState.Blocked
     ) {
       let result;
+      const orig = initializedBy;
       try {
-        result =
-          typeof this.#initializer === "function"
-            ? this.#initializer()
-            : this.#initializer;
+        initializedBy = this;
+        const { updater, resolve, reject } = this.#queue[0];
+        result = typeof updater === "function" ? updater(this._value) : updater;
       } catch (error) {
         this.#handleError(error);
         return;
+      } finally {
+        initializedBy = orig;
       }
       if (result instanceof Promise) {
         this.#promise = result;
         result.then(
           (value) => {
             this._state = SparkleState.Fulfilled;
+            this.#queue[0]?.resolve?.(value);
             this._value = value;
+            this.#next();
+            this.#refreshDependents();
             changed();
           },
           (error) => {
@@ -177,21 +227,36 @@ export class Sparkle<T> {
           changed();
         }
       } else {
+        this.#queue[0]?.resolve?.(result);
         this._state = SparkleState.Fulfilled;
         this._value = result;
+        this.#next();
+        this.#refreshDependents();
         changed();
       }
     }
   }
 
+  #refreshDependents() {
+    for (const dependent of this.#dependents) {
+      dependent.refresh();
+    }
+  }
+
   get value() {
+    initializedBy && this.#dependents.add(initializedBy);
     this.#maybeLoad();
     if (this._state === SparkleState.Rejected) {
       throw this._error;
     }
-    if (this._state === SparkleState.Fulfilled && this._value !== undefined) {
+    if (
+      this._state === SparkleState.Fulfilled ||
+      this._state === SparkleState.Stale
+    ) {
       return this._value;
     }
     throw this._state;
   }
 }
+
+let initializedBy: Sparkle<any> | undefined;
